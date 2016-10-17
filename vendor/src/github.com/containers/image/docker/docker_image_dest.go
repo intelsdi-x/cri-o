@@ -62,29 +62,50 @@ func (d *dockerImageDestination) SupportsSignatures() error {
 	return fmt.Errorf("Pushing signatures to a Docker Registry is not supported")
 }
 
-// PutBlob writes contents of stream and returns its computed digest and size.
-// A digest can be optionally provided if known, the specific image destination can decide to play with it or not.
-// The length of stream is expected to be expectedSize; if expectedSize == -1, it is not known.
+// ShouldCompressLayers returns true iff it is desirable to compress layer blobs written to this destination.
+func (d *dockerImageDestination) ShouldCompressLayers() bool {
+	return true
+}
+
+// sizeCounter is an io.Writer which only counts the total size of its input.
+type sizeCounter struct{ size int64 }
+
+func (c *sizeCounter) Write(p []byte) (n int, err error) {
+	c.size += int64(len(p))
+	return len(p), nil
+}
+
+// PutBlob writes contents of stream and returns data representing the result (with all data filled in).
+// inputInfo.Digest can be optionally provided if known; it is not mandatory for the implementation to verify it.
+// inputInfo.Size is the expected length of stream, if known.
 // WARNING: The contents of stream are being verified on the fly.  Until stream.Read() returns io.EOF, the contents of the data SHOULD NOT be available
 // to any other readers for download using the supplied digest.
 // If stream.Read() at any time, ESPECIALLY at end of input, returns an error, PutBlob MUST 1) fail, and 2) delete any data stored so far.
-func (d *dockerImageDestination) PutBlob(stream io.Reader, digest string, expectedSize int64) (string, int64, error) {
-	if digest != "" {
-		checkURL := fmt.Sprintf(blobsURL, d.ref.ref.RemoteName(), digest)
+func (d *dockerImageDestination) PutBlob(stream io.Reader, inputInfo types.BlobInfo) (types.BlobInfo, error) {
+	if inputInfo.Digest != "" {
+		checkURL := fmt.Sprintf(blobsURL, d.ref.ref.RemoteName(), inputInfo.Digest)
 
 		logrus.Debugf("Checking %s", checkURL)
 		res, err := d.c.makeRequest("HEAD", checkURL, nil, nil)
 		if err != nil {
-			return "", -1, err
+			return types.BlobInfo{}, err
 		}
 		defer res.Body.Close()
-		if res.StatusCode == http.StatusOK {
+		switch res.StatusCode {
+		case http.StatusOK:
 			logrus.Debugf("... already exists, not uploading")
 			blobLength, err := strconv.ParseInt(res.Header.Get("Content-Length"), 10, 64)
 			if err != nil {
-				return "", -1, err
+				return types.BlobInfo{}, err
 			}
-			return digest, blobLength, nil
+			return types.BlobInfo{Digest: inputInfo.Digest, Size: blobLength}, nil
+		case http.StatusUnauthorized:
+			logrus.Debugf("... not authorized")
+			return types.BlobInfo{}, fmt.Errorf("not authorized to read from destination repository %s", d.ref.ref.RemoteName())
+		case http.StatusNotFound:
+			// noop
+		default:
+			return types.BlobInfo{}, fmt.Errorf("failed to read from destination repository %s: %v", d.ref.ref.RemoteName(), http.StatusText(res.StatusCode))
 		}
 		logrus.Debugf("... failed, status %d", res.StatusCode)
 	}
@@ -94,24 +115,25 @@ func (d *dockerImageDestination) PutBlob(stream io.Reader, digest string, expect
 	logrus.Debugf("Uploading %s", uploadURL)
 	res, err := d.c.makeRequest("POST", uploadURL, nil, nil)
 	if err != nil {
-		return "", -1, err
+		return types.BlobInfo{}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusAccepted {
 		logrus.Debugf("Error initiating layer upload, response %#v", *res)
-		return "", -1, fmt.Errorf("Error initiating layer upload to %s, status %d", uploadURL, res.StatusCode)
+		return types.BlobInfo{}, fmt.Errorf("Error initiating layer upload to %s, status %d", uploadURL, res.StatusCode)
 	}
 	uploadLocation, err := res.Location()
 	if err != nil {
-		return "", -1, fmt.Errorf("Error determining upload URL: %s", err.Error())
+		return types.BlobInfo{}, fmt.Errorf("Error determining upload URL: %s", err.Error())
 	}
 
 	h := sha256.New()
-	tee := io.TeeReader(stream, h)
-	res, err = d.c.makeRequestToResolvedURL("PATCH", uploadLocation.String(), map[string][]string{"Content-Type": {"application/octet-stream"}}, tee, expectedSize)
+	sizeCounter := &sizeCounter{}
+	tee := io.TeeReader(stream, io.MultiWriter(h, sizeCounter))
+	res, err = d.c.makeRequestToResolvedURL("PATCH", uploadLocation.String(), map[string][]string{"Content-Type": {"application/octet-stream"}}, tee, inputInfo.Size)
 	if err != nil {
 		logrus.Debugf("Error uploading layer chunked, response %#v", *res)
-		return "", -1, err
+		return types.BlobInfo{}, err
 	}
 	defer res.Body.Close()
 	hash := h.Sum(nil)
@@ -119,38 +141,41 @@ func (d *dockerImageDestination) PutBlob(stream io.Reader, digest string, expect
 
 	uploadLocation, err = res.Location()
 	if err != nil {
-		return "", -1, fmt.Errorf("Error determining upload URL: %s", err.Error())
+		return types.BlobInfo{}, fmt.Errorf("Error determining upload URL: %s", err.Error())
 	}
 
 	// FIXME: DELETE uploadLocation on failure
 
 	locationQuery := uploadLocation.Query()
-	// TODO: check digest == computedDigest https://github.com/containers/image/pull/70#discussion_r77646717
+	// TODO: check inputInfo.Digest == computedDigest https://github.com/containers/image/pull/70#discussion_r77646717
 	locationQuery.Set("digest", computedDigest)
 	uploadLocation.RawQuery = locationQuery.Encode()
 	res, err = d.c.makeRequestToResolvedURL("PUT", uploadLocation.String(), map[string][]string{"Content-Type": {"application/octet-stream"}}, nil, -1)
 	if err != nil {
-		return "", -1, err
+		return types.BlobInfo{}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusCreated {
 		logrus.Debugf("Error uploading layer, response %#v", *res)
-		return "", -1, fmt.Errorf("Error uploading layer to %s, status %d", uploadLocation, res.StatusCode)
+		return types.BlobInfo{}, fmt.Errorf("Error uploading layer to %s, status %d", uploadLocation, res.StatusCode)
 	}
 
-	logrus.Debugf("Upload of layer %s complete", digest)
-	return computedDigest, res.Request.ContentLength, nil
+	logrus.Debugf("Upload of layer %s complete", computedDigest)
+	return types.BlobInfo{Digest: computedDigest, Size: sizeCounter.size}, nil
 }
 
 func (d *dockerImageDestination) PutManifest(m []byte) error {
-	// FIXME: This only allows upload by digest, not creating a tag.  See the
-	// corresponding comment in openshift.NewImageDestination.
 	digest, err := manifest.Digest(m)
 	if err != nil {
 		return err
 	}
 	d.manifestDigest = digest
-	url := fmt.Sprintf(manifestURL, d.ref.ref.RemoteName(), digest)
+
+	reference, err := d.ref.tagOrDigest()
+	if err != nil {
+		return err
+	}
+	url := fmt.Sprintf(manifestURL, d.ref.ref.RemoteName(), reference)
 
 	headers := map[string][]string{}
 	mimeType := manifest.GuessMIMEType(m)
@@ -237,6 +262,8 @@ func (d *dockerImageDestination) putOneSignature(url *url.URL, signature []byte)
 		}
 		return nil
 
+	case "http", "https":
+		return fmt.Errorf("Writing directly to a %s sigstore %s is not supported. Configure a sigstore-staging: location.", url.Scheme, url.String())
 	default:
 		return fmt.Errorf("Unsupported scheme when writing signature to %s", url.String())
 	}
@@ -254,6 +281,8 @@ func (c *dockerClient) deleteOneSignature(url *url.URL) (missing bool, err error
 		}
 		return false, err
 
+	case "http", "https":
+		return false, fmt.Errorf("Writing directly to a %s sigstore %s is not supported. Configure a sigstore-staging: location.", url.Scheme, url.String())
 	default:
 		return false, fmt.Errorf("Unsupported scheme when deleting signature from %s", url.String())
 	}

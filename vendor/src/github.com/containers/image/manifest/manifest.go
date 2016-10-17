@@ -19,6 +19,10 @@ const (
 	DockerV2Schema1SignedMediaType = "application/vnd.docker.distribution.manifest.v1+prettyjws"
 	// DockerV2Schema2MediaType MIME type represents Docker manifest schema 2
 	DockerV2Schema2MediaType = "application/vnd.docker.distribution.manifest.v2+json"
+	// DockerV2Schema2ConfigMediaType is the MIME type used for schema 2 config blobs.
+	DockerV2Schema2ConfigMediaType = "application/vnd.docker.container.image.v1+json"
+	// DockerV2Schema2LayerMediaType is the MIME type used for schema 2 layers.
+	DockerV2Schema2LayerMediaType = "application/vnd.docker.image.rootfs.diff.tar.gzip"
 	// DockerV2ListMediaType MIME type represents Docker manifest schema 2 list
 	DockerV2ListMediaType = "application/vnd.docker.distribution.manifest.list.v2+json"
 )
@@ -30,6 +34,7 @@ var DefaultRequestedManifestMIMETypes = []string{
 	DockerV2Schema2MediaType,
 	DockerV2Schema1SignedMediaType,
 	DockerV2Schema1MediaType,
+	DockerV2ListMediaType,
 }
 
 // GuessMIMEType guesses MIME type of a manifest and returns it _if it is recognized_, or "" if unknown or unrecognized.
@@ -94,4 +99,22 @@ func MatchesDigest(manifest []byte, expectedDigest string) (bool, error) {
 		return false, err
 	}
 	return expectedDigest == actualDigest, nil
+}
+
+// AddDummyV2S1Signature adds an JWS signature with a temporary key (i.e. useless) to a v2s1 manifest.
+// This is useful to make the manifest acceptable to a Docker Registry (even though nothing needs or wants the JWS signature).
+func AddDummyV2S1Signature(manifest []byte) ([]byte, error) {
+	key, err := libtrust.GenerateECP256PrivateKey()
+	if err != nil {
+		return nil, err // Coverage: This can fail only if rand.Reader fails.
+	}
+
+	js, err := libtrust.NewJSONSignature(manifest)
+	if err != nil {
+		return nil, err
+	}
+	if err := js.Sign(key); err != nil { // Coverage: This can fail basically only if rand.Reader fails.
+		return nil, err
+	}
+	return js.PrettySignature("signatures")
 }
