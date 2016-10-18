@@ -3,13 +3,13 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/containers/storage/cri"
+	"github.com/containers/storage/storage"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/kubernetes-incubator/cri-o/oci"
-	"github.com/kubernetes-incubator/cri-o/utils"
 	"github.com/opencontainers/runc/libcontainer/label"
 	"github.com/opencontainers/runtime-tools/generate"
 	"golang.org/x/net/context"
@@ -32,6 +32,8 @@ type sandbox struct {
 
 const (
 	podDefaultNamespace = "default"
+	podInfraImage       = "kubernetes/pause"
+	podInfraCommand     = "/pause"
 )
 
 func (s *sandbox) addContainer(c *oci.Container) {
@@ -78,7 +80,7 @@ func (s *Server) getPodSandboxFromRequest(req podSandboxRequest) (*sandbox, erro
 
 	sb := s.getSandbox(sandboxID)
 	if sb == nil {
-		return nil, fmt.Errorf("specified sandbox not found: %s", sandboxID)
+		return nil, fmt.Errorf("specified pod sandbox not found: %s", sandboxID)
 	}
 	return sb, nil
 }
@@ -87,6 +89,7 @@ func (s *Server) getPodSandboxFromRequest(req podSandboxRequest) (*sandbox, erro
 func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest) (*pb.RunPodSandboxResponse, error) {
 	logrus.Debugf("RunPodSandboxRequest %+v", req)
 	var processLabel, mountLabel string
+
 	// process req.Name
 	name := req.GetConfig().GetMetadata().GetName()
 	if name == "" {
@@ -98,6 +101,10 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 
 	var err error
 	id, name, err := s.generatePodIDandName(name, namespace, attempt)
+	if err != nil {
+		return nil, err
+	}
+	_, containerName, err := s.generateContainerIDandName(name, "infra", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -120,33 +127,47 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 		}
 	}()
 
-	podSandboxDir := filepath.Join(s.config.SandboxDir, id)
-	if _, err = os.Stat(podSandboxDir); err == nil {
-		return nil, fmt.Errorf("pod sandbox (%s) already exists", podSandboxDir)
+	pauseName := s.config.PauseImage
+	pauseCommand := s.config.PauseCommand
+	if pauseName == "" || pauseCommand == "" {
+		pauseName = podInfraImage
+		pauseCommand = podInfraCommand
 	}
 
+	storageMetadata := cri.StorageRuntimeContainerMetadata{
+		Pod:           true,
+		PodName:       name,
+		PodID:         id,
+		ImageName:     pauseName,
+		ContainerName: containerName,
+		MetadataName:  req.GetConfig().GetMetadata().GetName(),
+		Uid:           req.GetConfig().GetMetadata().GetUid(),
+		Namespace:     namespace,
+		Attempt:       req.GetConfig().GetMetadata().GetAttempt(),
+	}
+	podContainer, err := s.storage.CreatePodSandbox(ctx, storageMetadata)
+	if err == storage.ErrDuplicateName {
+		return nil, fmt.Errorf("pod sandbox with name %q already exists", name)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error creating pod sandbox with name %q: %v", name, err)
+	}
 	defer func() {
 		if err != nil {
-			if err2 := os.RemoveAll(podSandboxDir); err2 != nil {
-				logrus.Warnf("couldn't cleanup podSandboxDir %s: %v", podSandboxDir, err2)
+			if err2 := s.storage.RemovePodSandbox(id); err2 != nil {
+				logrus.Warnf("couldn't cleanup pod sandbox %q: %v", id, err2)
 			}
 		}
 	}()
 
-	if err = os.MkdirAll(podSandboxDir, 0755); err != nil {
-		return nil, err
-	}
+	// TODO: factor generating/updating the spec into something other projects can vendor
 
 	// creates a spec Generator with the default spec.
 	g := generate.New()
 
-	// TODO: Make the `graph/vfs` part of this configurable once the storage
-	//       integration has been merged.
-	podInfraRootfs := filepath.Join(s.config.Root, "graph/vfs/pause")
 	// setup defaults for the pod sandbox
-	g.SetRootPath(filepath.Join(podInfraRootfs, "rootfs"))
 	g.SetRootReadonly(true)
-	g.SetProcessArgs([]string{"/pause"})
+	g.SetProcessArgs([]string{pauseCommand})
 
 	// set hostname
 	hostname := req.GetConfig().GetHostname()
@@ -164,7 +185,7 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 	dnsServers := req.GetConfig().GetDnsConfig().GetServers()
 	dnsSearches := req.GetConfig().GetDnsConfig().GetSearches()
 	dnsOptions := req.GetConfig().GetDnsConfig().GetOptions()
-	resolvPath := fmt.Sprintf("%s/resolv.conf", podSandboxDir)
+	resolvPath := fmt.Sprintf("%s/resolv.conf", podContainer.RunDir)
 	err = parseDNSOptions(dnsServers, dnsSearches, dnsOptions, resolvPath)
 	if err != nil {
 		err1 := removeFile(resolvPath)
@@ -207,25 +228,20 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 		g.SetProcessSelinuxLabel(processLabel)
 	}
 
-	containerID, containerName, err := s.generateContainerIDandName(name, "infra", 0)
-	if err != nil {
-		return nil, err
-	}
-
 	defer func() {
 		if err != nil {
 			s.releaseContainerName(containerName)
 		}
 	}()
 
-	if err = s.ctrIDIndex.Add(containerID); err != nil {
+	if err = s.ctrIDIndex.Add(id); err != nil {
 		return nil, err
 	}
 
 	defer func() {
 		if err != nil {
-			if err = s.ctrIDIndex.Delete(containerID); err != nil {
-				logrus.Warnf("couldn't delete ctr id %s from idIndex", containerID)
+			if err = s.ctrIDIndex.Delete(id); err != nil {
+				logrus.Warnf("couldn't delete ctr id %s from idIndex", id)
 			}
 		}
 	}()
@@ -235,8 +251,9 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 	g.AddAnnotation("ocid/annotations", string(annotationsJSON))
 	g.AddAnnotation("ocid/log_path", logDir)
 	g.AddAnnotation("ocid/name", name)
+	g.AddAnnotation("ocid/sandbox_id", id)
 	g.AddAnnotation("ocid/container_name", containerName)
-	g.AddAnnotation("ocid/container_id", containerID)
+	g.AddAnnotation("ocid/container_id", id)
 
 	sb := &sandbox{
 		id:           id,
@@ -254,6 +271,16 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 
 	for k, v := range annotations {
 		g.AddAnnotation(k, v)
+	}
+
+	storageMetadata, err = s.storage.GetContainerMetadata(id)
+	if err != nil {
+		return nil, err
+	}
+	storageMetadata.SetMountLabel(mountLabel)
+	err = s.storage.SetContainerMetadata(id, storageMetadata)
+	if err != nil {
+		return nil, err
 	}
 
 	// setup cgroup settings
@@ -284,23 +311,21 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 		}
 	}
 
-	err = g.SaveToFile(filepath.Join(podSandboxDir, "config.json"))
+	saveOptions := generate.ExportOptions{}
+	mountPoint, err := s.storage.StartContainer(id)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to mount container %s in pod sandbox %s(%s): %v", containerName, id, err)
+	}
+	g.SetRootPath(mountPoint)
+	err = g.SaveToFile(filepath.Join(podContainer.Dir, "config.json"), saveOptions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save template configuration for pod sandbox %s(%s): %v", containerName, id, err)
+	}
+	if err = g.SaveToFile(filepath.Join(podContainer.RunDir, "config.json"), saveOptions); err != nil {
+		return nil, fmt.Errorf("failed to write runtime configuration for pod sandbox %s: %v", containerName, err)
 	}
 
-	if _, err = os.Stat(podInfraRootfs); err != nil {
-		if os.IsNotExist(err) {
-			// TODO: Replace by rootfs creation API when it is ready
-			if err = utils.CreateInfraRootfs(podInfraRootfs, s.config.Pause); err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, err
-		}
-	}
-
-	container, err := oci.NewContainer(containerID, containerName, podSandboxDir, podSandboxDir, labels, nil, id, false)
+	container, err := oci.NewContainer(id, containerName, podContainer.RunDir, logDir, labels, nil, id, false)
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +391,10 @@ func (s *Server) StopPodSandbox(ctx context.Context, req *pb.StopPodSandboxReque
 		cStatus := s.runtime.ContainerStatus(c)
 		if cStatus.Status != oci.ContainerStateStopped {
 			if err := s.runtime.StopContainer(c); err != nil {
-				return nil, fmt.Errorf("failed to stop container %s in sandbox %s: %v", c.Name(), sb.id, err)
+				return nil, fmt.Errorf("failed to stop container %s in pod sandbox %s: %v", c.Name(), sb.id, err)
+			}
+			if err := s.storage.StopContainer(c.ID()); err != nil {
+				return nil, fmt.Errorf("failed to unmount container %s in pod sandbox %s: %v", c.Name(), sb.id, err)
 			}
 		}
 	}
@@ -403,16 +431,15 @@ func (s *Server) RemovePodSandbox(ctx context.Context, req *pb.RemovePodSandboxR
 		}
 
 		if err := s.runtime.DeleteContainer(c); err != nil {
-			return nil, fmt.Errorf("failed to delete container %s in sandbox %s: %v", c.Name(), sb.id, err)
+			return nil, fmt.Errorf("failed to delete container %s in pod sandbox %s: %v", c.Name(), sb.id, err)
 		}
 
 		if c == podInfraContainer {
 			continue
 		}
 
-		containerDir := filepath.Join(s.runtime.ContainerDir(), c.ID())
-		if err := os.RemoveAll(containerDir); err != nil {
-			return nil, fmt.Errorf("failed to remove container %s directory: %v", c.Name(), err)
+		if err := s.storage.DeleteContainer(c.ID()); err != nil {
+			return nil, fmt.Errorf("failed to delete container %s in pod sandbox %s: %v", c.Name(), sb.id, err)
 		}
 
 		s.releaseContainerName(c.Name())
@@ -424,10 +451,10 @@ func (s *Server) RemovePodSandbox(ctx context.Context, req *pb.RemovePodSandboxR
 	}
 
 	// Remove the files related to the sandbox
-	podSandboxDir := filepath.Join(s.config.SandboxDir, sb.id)
-	if err := os.RemoveAll(podSandboxDir); err != nil {
-		return nil, fmt.Errorf("failed to remove sandbox %s directory: %v", sb.id, err)
+	if err := s.storage.RemovePodSandbox(sb.id); err != nil {
+		return nil, fmt.Errorf("failed to remove pod sandbox %s: %v", sb.id, err)
 	}
+
 	s.releaseContainerName(podInfraContainer.Name())
 	s.removeContainer(podInfraContainer)
 	sb.infraContainer = nil

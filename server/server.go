@@ -3,12 +3,12 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/Sirupsen/logrus"
+	scri "github.com/containers/storage/cri"
+	"github.com/containers/storage/storage"
 	"github.com/docker/docker/pkg/registrar"
 	"github.com/docker/docker/pkg/truncindex"
 	"github.com/kubernetes-incubator/cri-o/oci"
@@ -27,6 +27,9 @@ const (
 type Server struct {
 	config       Config
 	runtime      *oci.Runtime
+	store        storage.Store
+	images       pb.ImageServiceServer
+	storage      scri.StorageRuntimeServer
 	stateLock    sync.Mutex
 	state        *serverState
 	netPlugin    ocicni.CNIPlugin
@@ -37,7 +40,7 @@ type Server struct {
 }
 
 func (s *Server) loadContainer(id string) error {
-	config, err := ioutil.ReadFile(filepath.Join(s.runtime.ContainerDir(), id, "config.json"))
+	config, err := s.store.GetContainerDirectoryFile(id, "config.json")
 	if err != nil {
 		return err
 	}
@@ -68,7 +71,10 @@ func (s *Server) loadContainer(id string) error {
 	if v := m.Annotations["ocid/tty"]; v == "true" {
 		tty = true
 	}
-	containerPath := filepath.Join(s.runtime.ContainerDir(), id)
+	containerPath, err := s.store.GetContainerRunDirectory(id)
+	if err != nil {
+		return err
+	}
 
 	ctr, err := oci.NewContainer(id, name, containerPath, m.Annotations["ocid/log_path"], labels, &metadata, sb.id, tty)
 	if err != nil {
@@ -85,7 +91,7 @@ func (s *Server) loadContainer(id string) error {
 }
 
 func (s *Server) loadSandbox(id string) error {
-	config, err := ioutil.ReadFile(filepath.Join(s.config.SandboxDir, id, "config.json"))
+	config, err := s.store.GetContainerDirectoryFile(id, "config.json")
 	if err != nil {
 		return err
 	}
@@ -130,7 +136,10 @@ func (s *Server) loadSandbox(id string) error {
 	}
 	s.addSandbox(sb)
 
-	sandboxPath := filepath.Join(s.config.SandboxDir, id)
+	sandboxPath, err := s.store.GetContainerRunDirectory(id)
+	if err != nil {
+		return err
+	}
 
 	if err := label.ReserveLabel(processLabel); err != nil {
 		return err
@@ -146,7 +155,7 @@ func (s *Server) loadSandbox(id string) error {
 	}
 	sb.infraContainer = scontainer
 	if err = s.runtime.UpdateStatus(scontainer); err != nil {
-		logrus.Warnf("error updating status for container %s: %v", scontainer.ID(), err)
+		logrus.Warnf("error updating status for pod sandbox infra container %s: %v", scontainer.ID(), err)
 	}
 	if err = s.ctrIDIndex.Add(scontainer.ID()); err != nil {
 		return err
@@ -158,29 +167,32 @@ func (s *Server) loadSandbox(id string) error {
 }
 
 func (s *Server) restore() {
-	sandboxDir, err := ioutil.ReadDir(s.config.SandboxDir)
+	containers, err := s.store.Containers()
 	if err != nil && !os.IsNotExist(err) {
-		logrus.Warnf("could not read sandbox directory %s: %v", sandboxDir, err)
+		logrus.Warnf("could not read containers and sandboxes: %v", err)
 	}
-	for _, v := range sandboxDir {
-		if !v.IsDir() {
+	pods := map[string]*scri.StorageRuntimeContainerMetadata{}
+	podContainers := map[string]*scri.StorageRuntimeContainerMetadata{}
+	for _, container := range containers {
+		metadata, err := s.storage.GetContainerMetadata(container.ID)
+		if err != nil {
+			logrus.Warnf("error parsing metadata for %s: %v, ignoring", container.ID, err)
 			continue
 		}
-		if err = s.loadSandbox(v.Name()); err != nil {
-			logrus.Warnf("could not restore sandbox %s: %v", v.Name(), err)
+		if metadata.Pod {
+			pods[container.ID] = &metadata
+		} else {
+			podContainers[container.ID] = &metadata
 		}
 	}
-	containerDir, err := ioutil.ReadDir(s.runtime.ContainerDir())
-	if err != nil && !os.IsNotExist(err) {
-		logrus.Warnf("could not read container directory %s: %v", s.runtime.ContainerDir(), err)
-	}
-	for _, v := range containerDir {
-		if !v.IsDir() {
-			continue
+	for containerID, metadata := range pods {
+		if err = s.loadSandbox(containerID); err != nil {
+			logrus.Warnf("could not restore sandbox %s container %s: %v", metadata.PodID, containerID, err)
 		}
-		if err := s.loadContainer(v.Name()); err != nil {
-			logrus.Warnf("could not restore container %s: %v", v.Name(), err)
-
+	}
+	for containerID, _ := range podContainers {
+		if err := s.loadContainer(containerID); err != nil {
+			logrus.Warnf("could not restore container %s: %v", containerID, err)
 		}
 	}
 }
@@ -223,6 +235,11 @@ func (s *Server) releaseContainerName(name string) {
 	s.ctrNameIndex.Release(name)
 }
 
+func (s *Server) Shutdown() error {
+	_, err := s.store.Shutdown(false)
+	return err
+}
+
 // New creates a new Server with options provided
 func New(config *Config) (*Server, error) {
 	// TODO: This will go away later when we have wrapper process or systemd acting as
@@ -233,15 +250,27 @@ func New(config *Config) (*Server, error) {
 
 	utils.StartReaper()
 
-	if err := os.MkdirAll(config.ImageDir, 0755); err != nil {
+	store, err := storage.GetStore(storage.StoreOptions{
+		RunRoot:            config.RunRoot,
+		GraphRoot:          config.Root,
+		GraphDriverName:    config.Storage,
+		GraphDriverOptions: config.StorageOption,
+	})
+	if err != nil {
 		return nil, err
 	}
 
-	if err := os.MkdirAll(config.SandboxDir, 0755); err != nil {
+	imageService, err := scri.GetStorageImageService(store, config.DefaultTransport)
+	if err != nil {
 		return nil, err
 	}
 
-	r, err := oci.New(config.Runtime, config.ContainerDir, config.Conmon, config.ConmonEnv)
+	storageRuntimeService := scri.GetStorageRuntimeService(imageService)
+	if err != nil {
+		return nil, err
+	}
+
+	r, err := oci.New(config.Runtime, config.Conmon, config.ConmonEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -253,6 +282,9 @@ func New(config *Config) (*Server, error) {
 	}
 	s := &Server{
 		runtime:   r,
+		store:     store,
+		images:    imageService,
+		storage:   storageRuntimeService,
 		netPlugin: netPlugin,
 		config:    *config,
 		state: &serverState{
