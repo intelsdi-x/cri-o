@@ -15,7 +15,7 @@ MANDIR ?= ${PREFIX}/share/man
 ETCDIR ?= ${DESTDIR}/etc
 GO_MD2MAN ?= $(shell which go-md2man)
 export GOPATH := ${CURDIR}/vendor
-BUILDTAGS := selinux
+BUILDTAGS := selinux $(shell ./hack/btrfs_tag.sh) $(shell ./hack/libdm_tag.sh)
 
 all: binaries ocid.conf docs
 
