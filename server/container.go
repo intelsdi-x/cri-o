@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
@@ -187,7 +188,7 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 			}
 		}
 
-		specgen.AddBindMount(src, dest, options)
+		specgen.AddBindMount(src, dest, strings.Split(options, ","))
 
 	}
 

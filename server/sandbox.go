@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/containers/storage/cri"
@@ -196,7 +197,7 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 		return nil, err
 	}
 
-	g.AddBindMount(resolvPath, "/etc/resolv.conf", "ro")
+	g.AddBindMount(resolvPath, "/etc/resolv.conf", strings.Split("ro", ","))
 
 	// add metadata
 	metadata := req.GetConfig().GetMetadata()
