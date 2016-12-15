@@ -44,6 +44,17 @@ func New(runtimePath string, containerDir string, conmonPath string, conmonEnv [
 		conmonEnv:     conmonEnv,
 		cgroupManager: cgroupManager,
 	}
+
+	var err error
+	streamServerConfig := streaming.DefaultConfig
+	streamServerConfig.Addr = "0.0.0.0:10101"
+	r.streamServer, err = streaming.NewServer(streamServerConfig, r)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create streaming server")
+	}
+
+	r.streamServer.Start(true)
+
 	return r, nil
 }
 
@@ -56,6 +67,7 @@ type Runtime struct {
 	conmonEnv     []string
 	cgroupManager string
 	streamServer streaming.Server
+	streaming.Runtime
 }
 
 // syncInfo is used to return data from monitor process to daemon
