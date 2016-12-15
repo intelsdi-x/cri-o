@@ -88,5 +88,25 @@ clone git github.com/gogo/protobuf 43a2e0b1c32252bfbbdf81f7faa7a88fb3fa4028
 clone git github.com/gorilla/context v1.1
 clone git golang.org/x/sys 8f0908ab3b2457e2e15403d3697c9ef5cb4b57a9 https://github.com/golang/sys.git
 clone git github.com/seccomp/libseccomp-golang 32f571b70023028bd57d9288c20efbcb237f3ce0
+clone git github.com/emicklei/go-restful master
+clone git golang.org/x/text master https://github.com/golang/text.git 
+clone git github.com/ugorji/go master
+clone git github.com/davecgh/go-spew master
+clone git github.com/mitchellh/go-wordwrap master
+clone git github.com/pborman/uuid master
+clone git github.com/google/gofuzz master
+clone git github.com/gogo/protobuf master
+clone git github.com/go-openapi/spec master
+clone git github.com/docker/spdystream master
+clone git github.com/go-openapi/jsonpointer master
+clone git github.com/go-openapi/jsonreference master
+clone git github.com/go-openapi/swag master
+clone git github.com/PuerkitoBio/purell master
+clone git github.com/PuerkitoBio/urlesc master
+clone git github.com/mailru/easyjson master
+clone git github.com/spf13/pflag master
+clone git gopkg.in/inf.v0 master
+
+
 
 clean

@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sys/unix"
 	"k8s.io/kubernetes/pkg/fields"
 	pb "k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/runtime"
+	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
 )
 
 const (
@@ -54,6 +55,7 @@ type Runtime struct {
 	conmonPath    string
 	conmonEnv     []string
 	cgroupManager string
+	streamServer streaming.Server
 }
 
 // syncInfo is used to return data from monitor process to daemon
