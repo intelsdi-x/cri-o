@@ -31,9 +31,10 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 		return nil, fmt.Errorf("exec command cannot be empty")
 	}
 
-	url := "url"
+	resp, err := s.runtime.GetExec(req)
+	if err != nil {
+		return nil, fmt.Errorf("unable to prepare exec endpoint")
+	}
 
-	return &pb.ExecResponse{
-		Url: &url,
-	}, nil
+	return resp, nil
 }

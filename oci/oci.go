@@ -53,7 +53,10 @@ func New(runtimePath string, containerDir string, conmonPath string, conmonEnv [
 		return nil, fmt.Errorf("unable to create streaming server")
 	}
 
-	r.streamServer.Start(true)
+	// TODO: Is it should be started somewhere else?
+	go func() {
+		r.streamServer.Start(true)
+	}()
 
 	return r, nil
 }
@@ -73,6 +76,21 @@ type Runtime struct {
 // syncInfo is used to return data from monitor process to daemon
 type syncInfo struct {
 	Pid int `json:"pid"`
+}
+
+// GetExec returns exec stream request
+func (r *Runtime) GetExec(req *pb.ExecRequest) (*pb.ExecResponse, error) {
+	return r.streamServer.GetExec(req)
+}
+
+// GetAttach returns attach stream request
+func (r *Runtime) GetAttach(req *pb.AttachRequest) (*pb.AttachResponse, error) {
+	return r.streamServer.GetAttach(req, true)
+}
+
+// GetPortForward returns port forward stream request
+func (r *Runtime) GetPortForward(req *pb.PortForwardRequest) (*pb.PortForwardResponse, error) {
+	return r.streamServer.GetPortForward(req)
 }
 
 // Name returns the name of the OCI Runtime
