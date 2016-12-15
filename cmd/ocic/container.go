@@ -22,6 +22,7 @@ var containerCommand = cli.Command{
 		containerStatusCommand,
 		listContainersCommand,
 		execSyncCommand,
+		execCommand,
 	},
 }
 
@@ -229,6 +230,41 @@ var execSyncCommand = cli.Command{
 		client := pb.NewRuntimeServiceClient(conn)
 
 		err = ExecSync(client, context.String("id"), context.Args(), context.Int64("timeout"))
+		if err != nil {
+			return fmt.Errorf("execing command in container failed: %v", err)
+		}
+		return nil
+	},
+}
+
+var execCommand = cli.Command{
+	Name:  "exec",
+	Usage: "prepare a streaming endpoint to execute a command in the container",
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name:  "id",
+			Value: "",
+			Usage: "id of the container",
+		},
+		cli.BoolFlag{
+			Name:  "tty",
+			Usage: "wheter to use tty",
+		},
+		cli.BoolFlag{
+			Name:  "stdin",
+			Usage: "wheter to stream to stdin",
+		},
+	},
+	Action: func(context *cli.Context) error {
+		// Set up a connection to the server.
+		conn, err := getClientConnection(context)
+		if err != nil {
+			return fmt.Errorf("failed to connect: %v", err)
+		}
+		defer conn.Close()
+		client := pb.NewRuntimeServiceClient(conn)
+
+		err = Exec(client, context.String("id"), context.Bool("tty"), context.Bool("stdin"), context.Args())
 		if err != nil {
 			return fmt.Errorf("execing command in container failed: %v", err)
 		}
@@ -448,6 +484,27 @@ func ExecSync(client pb.RuntimeServiceClient, ID string, cmd []string, timeout i
 	fmt.Println("Stderr:")
 	fmt.Println(string(r.Stderr))
 	fmt.Printf("Exit code: %v\n", *r.ExitCode)
+
+	return nil
+}
+
+// Exec sends an ExecRequest to the server, and parses
+// the returned ExecResponse.
+func Exec(client pb.RuntimeServiceClient, ID string, tty bool, stdin bool, cmd []string) error {
+	if ID == "" {
+		return fmt.Errorf("ID cannot be empty")
+	}
+	r, err := client.Exec(context.Background(), &pb.ExecRequest{
+		ContainerId: &ID,
+		Cmd:         cmd,
+		Tty:         &tty,
+		Stdin:       &stdin,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println("URL:")
+	fmt.Println(*r.Url)
 
 	return nil
 }
