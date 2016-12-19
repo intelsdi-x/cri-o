@@ -3,11 +3,14 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"k8s.io/kubernetes/pkg/util/term"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/registrar"
@@ -19,11 +22,17 @@ import (
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rajatchopra/ocicni"
 	pb "k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/runtime"
+	"src/k8s.io/kubernetes/pkg/kubelet/server/streaming"
 )
 
 const (
 	runtimeAPIVersion = "v1alpha1"
 )
+
+type streamService struct {
+	streamServer streaming.Server
+	streaming.Runtime
+}
 
 // Server implements the RuntimeService and ImageService
 type Server struct {
@@ -42,6 +51,29 @@ type Server struct {
 
 	appArmorEnabled bool
 	appArmorProfile string
+
+	stream streamService
+}
+
+// GetExec returns exec stream request
+func (s *Server) GetExec(req *pb.ExecRequest) (*pb.ExecResponse, error) {
+	return s.stream.streamServer.GetExec(req)
+}
+
+// GetAttach returns attach stream request
+func (s *Server) GetAttach(req *pb.AttachRequest) (*pb.AttachResponse, error) {
+	return s.stream.streamServer.GetAttach(req, true)
+}
+
+// GetPortForward returns port forward stream request
+func (s *Server) GetPortForward(req *pb.PortForwardRequest) (*pb.PortForwardResponse, error) {
+	return s.stream.streamServer.GetPortForward(req)
+}
+
+// Exec endpoint for streaming.Runtime
+func (ss streamService) Exec(containerID string, cmd []string, in io.Reader, out, errOut io.WriteCloser, tty bool, resize <-chan term.Size) error {
+	fmt.Println(containerID, cmd, in, out, errOut, tty, resize)
+	return nil
 }
 
 func (s *Server) loadContainer(id string) error {
@@ -348,6 +380,18 @@ func New(config *Config) (*Server, error) {
 	s.ctrNameIndex = registrar.NewRegistrar()
 
 	s.restore()
+
+	streamServerConfig := streaming.DefaultConfig
+	streamServerConfig.Addr = "0.0.0.0:10101"
+	s.stream.streamServer, err = streaming.NewServer(streamServerConfig, s.stream)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create streaming server")
+	}
+
+	// TODO: Is it should be started somewhere else?
+	go func() {
+		s.stream.streamServer.Start(true)
+	}()
 
 	logrus.Debugf("sandboxes: %v", s.state.sandboxes)
 	logrus.Debugf("containers: %v", s.state.containers)

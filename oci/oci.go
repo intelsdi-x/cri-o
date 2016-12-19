@@ -22,7 +22,6 @@ import (
 	"golang.org/x/sys/unix"
 	"k8s.io/kubernetes/pkg/fields"
 	pb "k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/runtime"
-	"k8s.io/kubernetes/pkg/kubelet/server/streaming"
 )
 
 const (
@@ -45,19 +44,6 @@ func New(runtimePath string, containerDir string, conmonPath string, conmonEnv [
 		cgroupManager: cgroupManager,
 	}
 
-	var err error
-	streamServerConfig := streaming.DefaultConfig
-	streamServerConfig.Addr = "0.0.0.0:10101"
-	r.streamServer, err = streaming.NewServer(streamServerConfig, r)
-	if err != nil {
-		return nil, fmt.Errorf("unable to create streaming server")
-	}
-
-	// TODO: Is it should be started somewhere else?
-	go func() {
-		r.streamServer.Start(true)
-	}()
-
 	return r, nil
 }
 
@@ -69,28 +55,11 @@ type Runtime struct {
 	conmonPath    string
 	conmonEnv     []string
 	cgroupManager string
-	streamServer streaming.Server
-	streaming.Runtime
 }
 
 // syncInfo is used to return data from monitor process to daemon
 type syncInfo struct {
 	Pid int `json:"pid"`
-}
-
-// GetExec returns exec stream request
-func (r *Runtime) GetExec(req *pb.ExecRequest) (*pb.ExecResponse, error) {
-	return r.streamServer.GetExec(req)
-}
-
-// GetAttach returns attach stream request
-func (r *Runtime) GetAttach(req *pb.AttachRequest) (*pb.AttachResponse, error) {
-	return r.streamServer.GetAttach(req, true)
-}
-
-// GetPortForward returns port forward stream request
-func (r *Runtime) GetPortForward(req *pb.PortForwardRequest) (*pb.PortForwardResponse, error) {
-	return r.streamServer.GetPortForward(req)
 }
 
 // Name returns the name of the OCI Runtime
@@ -211,6 +180,7 @@ func (e ExecSyncError) Error() string {
 
 // ExecSync execs a command in a container and returns it's stdout, stderr and return code.
 func (r *Runtime) ExecSync(c *Container, command []string, timeout int64) (resp *ExecSyncResponse, err error) {
+
 	args := []string{"exec", c.name}
 	args = append(args, command...)
 	cmd := exec.Command(r.Path(), args...)
