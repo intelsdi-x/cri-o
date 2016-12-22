@@ -3,14 +3,11 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
 	"syscall"
-
-	"k8s.io/kubernetes/pkg/util/term"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/registrar"
@@ -30,7 +27,8 @@ const (
 )
 
 type streamService struct {
-	streamServer streaming.Server
+	runtimeServer *Server
+	streamServer  streaming.Server
 	streaming.Runtime
 }
 
@@ -68,12 +66,6 @@ func (s *Server) GetAttach(req *pb.AttachRequest) (*pb.AttachResponse, error) {
 // GetPortForward returns port forward stream request
 func (s *Server) GetPortForward(req *pb.PortForwardRequest) (*pb.PortForwardResponse, error) {
 	return s.stream.streamServer.GetPortForward(req)
-}
-
-// Exec endpoint for streaming.Runtime
-func (ss streamService) Exec(containerID string, cmd []string, in io.Reader, out, errOut io.WriteCloser, tty bool, resize <-chan term.Size) error {
-	fmt.Println(containerID, cmd, in, out, errOut, tty, resize)
-	return nil
 }
 
 func (s *Server) loadContainer(id string) error {
@@ -383,6 +375,7 @@ func New(config *Config) (*Server, error) {
 
 	streamServerConfig := streaming.DefaultConfig
 	streamServerConfig.Addr = "0.0.0.0:10101"
+	s.stream.runtimeServer = s
 	s.stream.streamServer, err = streaming.NewServer(streamServerConfig, s.stream)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create streaming server")

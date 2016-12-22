@@ -2,6 +2,10 @@ package server
 
 import (
 	"fmt"
+	"io"
+	"os/exec"
+
+	"k8s.io/kubernetes/pkg/util/term"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/kubernetes-incubator/cri-o/oci"
@@ -12,24 +16,6 @@ import (
 // Exec prepares a streaming endpoint to execute a command in the container.
 func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecResponse, error) {
 	logrus.Debugf("ExecRequest %+v", req)
-	c, err := s.getContainerFromRequest(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if err = s.runtime.UpdateStatus(c); err != nil {
-		return nil, err
-	}
-
-	cState := s.runtime.ContainerStatus(c)
-	if !(cState.Status == oci.ContainerStateRunning || cState.Status == oci.ContainerStateCreated) {
-		return nil, fmt.Errorf("container is not created or running")
-	}
-
-	cmd := req.GetCmd()
-	if cmd == nil {
-		return nil, fmt.Errorf("exec command cannot be empty")
-	}
 
 	resp, err := s.GetExec(req)
 	if err != nil {
@@ -37,4 +23,32 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 	}
 
 	return resp, nil
+}
+
+// Exec endpoint for streaming.Runtime
+func (ss streamService) Exec(containerID string, cmd []string, in io.Reader, out, errOut io.WriteCloser, tty bool, resize <-chan term.Size) error {
+	fmt.Println(containerID, cmd, in, out, errOut, tty, resize)
+	c := ss.runtimeServer.state.containers.Get(containerID)
+
+	if err := ss.runtimeServer.runtime.UpdateStatus(c); err != nil {
+		return err
+	}
+
+	cState := ss.runtimeServer.runtime.ContainerStatus(c)
+	if !(cState.Status == oci.ContainerStateRunning || cState.Status == oci.ContainerStateCreated) {
+		return fmt.Errorf("container is not created or running")
+	}
+
+	args := []string{"exec", c.Name()}                                // exec nazwa
+	args = append(args, cmd...)                                       // exec nazwa ls
+	execCmd := exec.Command(ss.runtimeServer.runtime.Path(), args...) // runc exec nazwa ls
+	execCmd.Stdin = in
+	execCmd.Stdout = out
+	execCmd.Stderr = errOut
+
+	if err := execCmd.Run(); err != nil {
+		return err
+	}
+
+	return nil
 }
