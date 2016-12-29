@@ -36,6 +36,8 @@ APPARMOR_TEST_PROFILE_NAME=${APPARMOR_TEST_PROFILE_NAME:-apparmor-test-deny-writ
 BOOT_CONFIG_FILE_PATH=${BOOT_CONFIG_FILE_PATH:-/boot/config-`uname -r`}
 # Path of apparmor parameters file.
 APPARMOR_PARAMETERS_FILE_PATH=${APPARMOR_PARAMETERS_FILE_PATH:-/sys/module/apparmor/parameters/enabled}
+# Path of the bin2img binary.
+BIN2IMG_BINARY=${BIN2IMG_BINARY:-${OCID_ROOT}/cri-o/test/bin2img/bin2img}
 
 TESTDIR=$(mktemp -d)
 if [ -e /usr/sbin/selinuxenabled ] && /usr/sbin/selinuxenabled; then
@@ -59,7 +61,7 @@ PATH=$PATH:$TESTDIR
 # Run ocid using the binary specified by $OCID_BINARY.
 # This must ONLY be run on engines created with `start_ocid`.
 function ocid() {
-	"$OCID_BINARY" "$@"
+	"$OCID_BINARY" --listen "$OCID_SOCKET" "$@"
 }
 
 # Run ocic using the binary specified by $OCID_BINARY.
@@ -112,7 +114,9 @@ function start_ocid() {
 		apparmor="$APPARMOR_PROFILE"
 	fi
 
-	"$OCID_BINARY" --conmon "$CONMON_BINARY" --pause "$PAUSE_BINARY" --listen "$OCID_SOCKET" --runtime "$RUNC_BINARY" --root "$TESTDIR/ocid" --sandboxdir "$TESTDIR/sandboxes" --containerdir "$TESTDIR/ocid/containers" --seccomp-profile "$seccomp" --apparmor-profile "$apparmor" --cni-config-dir "$OCID_CNI_CONFIG" config >$OCID_CONFIG
+	# Don't forget: bin2img and ocid have their own default drivers, so if you override either, you probably need to override both
+	"$BIN2IMG_BINARY" --root "$TESTDIR/ocid" --runroot "$TESTDIR/ocid-run" --source-binary "$PAUSE_BINARY"
+	"$OCID_BINARY" --conmon "$CONMON_BINARY" --listen "$OCID_SOCKET" --runtime "$RUNC_BINARY" --root "$TESTDIR/ocid" --runroot "$TESTDIR/ocid-run" --seccomp-profile "$seccomp" --apparmor-profile "$apparmor" --cni-config-dir "$OCID_CNI_CONFIG" config >$OCID_CONFIG
 	"$OCID_BINARY" --debug --config "$OCID_CONFIG" & OCID_PID=$!
 	wait_until_reachable
 }
@@ -125,6 +129,18 @@ function cleanup_ctrs() {
 			do
 			   ocic ctr stop --id "$line" || true
 			   ocic ctr remove --id "$line"
+			done
+		fi
+	fi
+}
+
+function cleanup_images() {
+	run ocic image list --quiet
+	if [ "$status" -eq 0 ]; then
+		if [ "$output" != "" ]; then
+			printf '%s\n' "$output" | while IFS= read -r line
+			do
+			   ocic image remove --id "$line"
 			done
 		fi
 	fi
@@ -147,6 +163,7 @@ function cleanup_pods() {
 function stop_ocid() {
 	if [ "$OCID_PID" != "" ]; then
 		kill "$OCID_PID" >/dev/null 2>&1
+		wait "$OCID_PID"
 		rm -f "$OCID_CONFIG"
 	fi
 }

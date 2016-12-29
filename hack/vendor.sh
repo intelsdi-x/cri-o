@@ -106,7 +106,11 @@ clone git github.com/PuerkitoBio/urlesc master
 clone git github.com/mailru/easyjson master
 clone git github.com/spf13/pflag master
 clone git gopkg.in/inf.v0 master
-
-
+clone git github.com/mistifyio/go-zfs master
+clone git github.com/pborman/uuid master
+clone git github.com/mtrmac/gpgme master
+clone git gopkg.in/cheggaaa/pb.v1 master
+clone git github.com/mattn/go-runewidth master
+clone git github.com/docker/engine-api v0.4.0
 
 clean
