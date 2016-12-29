@@ -254,6 +254,10 @@ var execCommand = cli.Command{
 			Name:  "stdin",
 			Usage: "wheter to stream to stdin",
 		},
+		cli.BoolFlag{
+			Name:  "url",
+			Usage: "do not exec command, just prepare streaming endpoint",
+		},
 	},
 	Action: func(context *cli.Context) error {
 		// Set up a connection to the server.
@@ -264,7 +268,7 @@ var execCommand = cli.Command{
 		defer conn.Close()
 		client := pb.NewRuntimeServiceClient(conn)
 
-		err = Exec(client, context.String("id"), context.Bool("tty"), context.Bool("stdin"), context.Args())
+		err = Exec(client, context.String("id"), context.Bool("tty"), context.Bool("stdin"), context.Bool("url"), context.Args())
 		if err != nil {
 			return fmt.Errorf("execing command in container failed: %v", err)
 		}
@@ -490,7 +494,7 @@ func ExecSync(client pb.RuntimeServiceClient, ID string, cmd []string, timeout i
 
 // Exec sends an ExecRequest to the server, and parses
 // the returned ExecResponse.
-func Exec(client pb.RuntimeServiceClient, ID string, tty bool, stdin bool, cmd []string) error {
+func Exec(client pb.RuntimeServiceClient, ID string, tty bool, stdin bool, urlOnly bool, cmd []string) error {
 	if ID == "" {
 		return fmt.Errorf("ID cannot be empty")
 	}
@@ -503,10 +507,18 @@ func Exec(client pb.RuntimeServiceClient, ID string, tty bool, stdin bool, cmd [
 	if err != nil {
 		return err
 	}
-	fmt.Println("URL:")
-	fmt.Println(*r.Url)
 
+	url := *r.Url
+
+	if urlOnly {
+		fmt.Println("URL:")
+		fmt.Println(url)
+		return nil
+	}
+
+	// exec
 	return nil
+
 }
 
 // ListContainers sends a ListContainerRequest to the server, and parses
