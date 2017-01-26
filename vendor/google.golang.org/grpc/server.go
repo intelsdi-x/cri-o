@@ -605,8 +605,10 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 			}
 			return nil
 		}
+		fmt.Println("GRPC query --> ", md.MethodName)
 		reply, appErr := md.Handler(srv.server, stream.Context(), df, s.opts.unaryInt)
 		if appErr != nil {
+			fmt.Println("GRPC query --> ", md.MethodName, " ERROR: ", appErr)
 			if err, ok := appErr.(*rpcError); ok {
 				statusCode = err.code
 				statusDesc = err.desc
@@ -624,6 +626,8 @@ func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.
 			}
 			return nil
 		}
+		fmt.Println("GRPC query --> ", md.MethodName, " OK")
+
 		if trInfo != nil {
 			trInfo.tr.LazyLog(stringer("OK"), false)
 		}
