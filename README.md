@@ -127,7 +127,7 @@ $ sudo cp bin/* /opt/cni/bin/
 ```
 
 ### Running with kubernetes
-You can run the local version of kubernetes using `local-up-cluster.sh` script. After running `ocid` daemon:
+You can run the local version of kubernetes using `local-up-cluster.sh`. After starting `ocid` daemon:
 ```sh
 EXPERIMENTAL_CRI=true CONTAINER_RUNTIME=remote CONTAINER_RUNTIME_ENDPOINT='/var/run/ocid.sock --runtime-request-timeout=15m' ./hack/local-up-cluster.sh
 ```
