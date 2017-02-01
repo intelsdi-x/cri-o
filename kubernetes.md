@@ -47,11 +47,19 @@ At first, you need to stop kubelet service working on the node:
 ```
 # systemctl stop kubelet
 ```
-and stop all kubelet docker containers that are still runing:
-```
-docker ps | grep k8s_
+and stop all kubelet docker containers that are still runing.
+
 ```
 # docker stop $(docker ps | grep k8s_ | awk '{print $1}')
 ```
 
+Kubelet parameters are stored in `/etc/kubernetes/kubelet.env` file.
+```
+# cat /etc/kubernetes/kubelet.env | grep KUBELET_ARGS
+KUBELET_ARGS="--pod-manifest-path=/etc/kubernetes/manifests 
+--pod-infra-container-image=gcr.io/google_containers/pause-amd64:3.0 
+--cluster_dns=10.233.0.3 --cluster_domain=cluster.local 
+--resolv-conf=/etc/resolv.conf --kubeconfig=/etc/kubernetes/node-kubeconfig.yaml
+--require-kubeconfig"
+```
 
